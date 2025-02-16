@@ -15,7 +15,75 @@
 
 #define NOMINMAX
 #include <windows.h>
-#include <conio.h>
+
+namespace conio
+{
+	HANDLE open_input()
+	{
+		return ::CreateFileW(
+			L"CONIN$",
+			GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE,
+			nullptr,
+			OPEN_EXISTING,
+			0,
+			nullptr);
+	}
+
+	void close_input(HANDLE console_input_handle)
+	{
+		::CloseHandle(console_input_handle);
+	}
+
+	int get_key(HANDLE console_input_handle)
+	{
+		if (console_input_handle == INVALID_HANDLE_VALUE)
+			return -1;
+
+		DWORD num_pending = 0;
+		if (!::GetNumberOfConsoleInputEvents(console_input_handle, &num_pending))
+			return -1;
+
+		if (num_pending == 0)
+			return -1;
+
+		INPUT_RECORD record;
+		DWORD num_read = 0;
+		while (num_pending--)
+		{
+			::ReadConsoleInputW(console_input_handle, &record, 1, &num_read);
+			if (record.EventType != KEY_EVENT || !record.Event.KeyEvent.bKeyDown)
+				continue;
+
+			if (record.Event.KeyEvent.uChar.AsciiChar)
+				return record.Event.KeyEvent.uChar.AsciiChar;
+			else
+			{
+				int result = record.Event.KeyEvent.wVirtualKeyCode;
+				return result << 16;
+			}
+		}
+
+		return -1;
+	}
+
+	bool set_cursor_visible(HANDLE h_screen_buffer, bool visible)
+	{
+		CONSOLE_CURSOR_INFO cursor_info;
+		::GetConsoleCursorInfo(h_screen_buffer, &cursor_info);
+		bool result = cursor_info.bVisible;
+		cursor_info.bVisible = visible;
+		::SetConsoleCursorInfo(h_screen_buffer, &cursor_info);
+		return result;
+	}
+
+	COORD get_screen_size(HANDLE h_std_out)
+	{
+		CONSOLE_SCREEN_BUFFER_INFO csbi;
+		::GetConsoleScreenBufferInfo(h_std_out, &csbi);
+		return csbi.dwSize;
+	}
+}
 
 namespace game_engine
 {
@@ -25,19 +93,16 @@ namespace game_engine
 	protected:
 		void run()
 		{
+			std::unique_ptr<void, void(*)(void*)> input(conio::open_input(), conio::close_input);
 			running_ = true;
 			while (running_)
 			{
 				auto derived = static_cast<T*>(this);
-				derived->draw();
-				if (_kbhit())
-				{
-					auto vkey = _getch();
-					if (!vkey || vkey == 0xE0)
-						vkey = (vkey << 8) | _getch();
-					derived->input(vkey);
-				}
-				derived->logic();
+				derived->on_draw();
+				auto key = conio::get_key(input.get());
+				if (key != -1)
+					derived->on_input(key);
+				derived->on_logic();
 				sleep();
 			}
 		};
@@ -83,30 +148,25 @@ class render final
 public:
 	render(short x, short y)
 	{
-		h_std_out = ::GetStdHandle(STD_OUTPUT_HANDLE);
+		h_std_out_ = ::GetStdHandle(STD_OUTPUT_HANDLE);
 		screen_size_ = COORD{x, y};
 		const auto buff_size = screen_size_.X * screen_size_.Y;
 		buff_ = std::make_unique<CHAR_INFO[]>(buff_size);
 		memset(buff_.get(), 0, buff_size * sizeof(CHAR_INFO));
 
-		h_screen_buffer_ = CreateConsoleScreenBuffer(
+		h_screen_buffer_ = ::CreateConsoleScreenBuffer(
 			GENERIC_READ | GENERIC_WRITE,
 			FILE_SHARE_READ | FILE_SHARE_WRITE,
 			nullptr,
 			CONSOLE_TEXTMODE_BUFFER,
 			nullptr);
-		SetConsoleActiveScreenBuffer(h_screen_buffer_);
-		// hide cursor
-		GetConsoleCursorInfo(h_screen_buffer_, &cursor_info_);
-		cursor_info_.bVisible = false;
-		SetConsoleCursorInfo(h_screen_buffer_, &cursor_info_);
+		::SetConsoleActiveScreenBuffer(h_screen_buffer_);
+		conio::set_cursor_visible(h_screen_buffer_, false);
 	}
 	~render()
 	{
-		//cursor_info_.bVisible = true;
-		//SetConsoleCursorInfo(h_screen_buffer_, &cursor_info_);
-		cursor_info_.bVisible = false;
-		::SetConsoleActiveScreenBuffer(h_std_out);
+		//conio::set_cursor_visible(h_screen_buffer_, true);
+		::SetConsoleActiveScreenBuffer(h_std_out_);
 	}
 	void set_char(int x, int y, WCHAR ch, WORD attr = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY)
 	{
@@ -115,20 +175,19 @@ public:
 	void update()
 	{
 		SMALL_RECT rect{0, 0, screen_size_.X - 1, screen_size_.Y - 1 };
-		::WriteConsoleOutput(h_screen_buffer_, buff_.get(), screen_size_, COORD{0, 0}, &rect);
+		::WriteConsoleOutputW(h_screen_buffer_, buff_.get(), screen_size_, COORD{0, 0}, &rect);
 	}
+
 	COORD get_screen_size()
 	{
-		CONSOLE_SCREEN_BUFFER_INFO csbi;
-		::GetConsoleScreenBufferInfo(h_std_out, &csbi);
-		return csbi.dwSize;
+		return conio::get_screen_size(h_std_out_);
 	}
+
 private:
 	HANDLE h_screen_buffer_{ INVALID_HANDLE_VALUE };
-	HANDLE h_std_out{ INVALID_HANDLE_VALUE };
+	HANDLE h_std_out_{ INVALID_HANDLE_VALUE };
 	std::unique_ptr<CHAR_INFO[]> buff_;
 	COORD screen_size_{ 0, 0 };
-	CONSOLE_CURSOR_INFO cursor_info_;
 };
 
 class snake final : public game_engine::game<snake>
@@ -174,7 +233,7 @@ private:
 		for (auto it = tail_.begin(), back = --tail_.end(); it != back; ++it)
 			render_.set_char(it->X, it->Y, 'O');
 	}
-	void draw()
+	void on_draw()
 	{
 		// clean
 		auto& tail_back = tail_.back();
@@ -186,26 +245,26 @@ private:
 
 		render_.update();
 	}
-	void input(int vkey)
+	void on_input(int vkey)
 	{
 		switch (vkey)
 		{
-		case 0xE04b:
+		case 0x250000:
 		case 'a':
 			if (direct_ != direction::RIGHT)
 				direct_ = direction::LEFT;
 			break;
-		case 0xE04d:
+		case 0x270000:
 		case 'd':
 			if (direct_ != direction::LEFT)
 				direct_ = direction::RIGHT;
 			break;
-		case 0xE048:
+		case 0x260000:
 		case 'w':
 			if (direct_ != direction::DOWN)
 				direct_ = direction::UP;
 			break;
-		case 0xE050:
+		case 0x280000:
 		case 's':
 			if (direct_ != direction::UP)
 				direct_ = direction::DOWN;
@@ -216,7 +275,7 @@ private:
 			break;
 		}
 	}
-	void logic()
+	void on_logic()
 	{
 		auto head = *tail_.begin();
 		auto tail_last = --tail_.end();
