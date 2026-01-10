@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
 
-project(snake_game LANGUAGES CXX)
+project(wsnake LANGUAGES CXX)
 
 add_executable(${PROJECT_NAME})
 # add_library(${PROJECT_NAME} STATIC)
