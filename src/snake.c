@@ -64,7 +64,7 @@ void init_terminal(terminal_state* state) {
 		return;
 	}
 
-	// Сохраняем оригинальный режим
+	// Save the original mode
 	if (!GetConsoleMode(state->input, &state->original_input_mode)) {
 		fprintf(stderr, "Error: GetConsoleMode failed for stdin\n");
 		return;
@@ -72,17 +72,17 @@ void init_terminal(terminal_state* state) {
 
 	DWORD mode = state->original_input_mode;
 
-	// Ключевые настройки для VT-ввода:
-	mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;  // Включаем VT-последовательности
-	mode &= ~ENABLE_PROCESSED_INPUT;        // Получаем "сырые" escape-коды
-	mode &= ~ENABLE_LINE_INPUT;             // Неканонический режим
-	mode &= ~ENABLE_ECHO_INPUT;             // Без эха
+	// Key settings for VT input:
+	mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;  // Enable VT sequences
+	mode &= ~ENABLE_PROCESSED_INPUT;        // Get "raw" escape codes
+	mode &= ~ENABLE_LINE_INPUT;             // Non-canonical mode
+	mode &= ~ENABLE_ECHO_INPUT;             // No echo
 
-	// Опционально для мыши
+	// Optional for mouse
 	// mode |= ENABLE_MOUSE_INPUT;
 
 	if (!SetConsoleMode(state->input, mode)) {
-		// Попробуем без ENABLE_VIRTUAL_TERMINAL_INPUT (для старых Windows)
+		// Try without ENABLE_VIRTUAL_TERMINAL_INPUT (for older Windows)
 		//mode &= ~ENABLE_VIRTUAL_TERMINAL_INPUT;
 		//if (!SetConsoleMode(state->input, mode)) {
 		//	fprintf(stderr, "Error: SetConsoleMode failed\n");
@@ -100,22 +100,22 @@ void init_terminal(terminal_state* state) {
 	if (!SetConsoleMode(state->output, mode))
 		return;
 #else
-	// Сохраняем текущие настройки
+	// Save current settings
 	if (tcgetattr(STDIN_FILENO, &state->original_termios) == -1) {
 		perror("tcgetattr");
 		return;
 	}
 	
-	// Устанавливаем неканонический режим
+	// Set non-canonical mode
 	struct termios raw = state->original_termios;
 	raw.c_lflag &= ~(ICANON | ECHO);
-	// Дополнительные настройки для более "сырого" режима:
-	raw.c_lflag &= ~ISIG;  // Отключаем обработку сигналов (Ctrl+C, Ctrl+Z)
-	raw.c_iflag &= ~(IXON | ICRNL); // Отключаем управление потоком и преобразование CR->NL
+	// Additional settings for more "raw" mode:
+	raw.c_lflag &= ~ISIG;  // Disable signal handling (Ctrl+C, Ctrl+Z)
+	raw.c_iflag &= ~(IXON | ICRNL); // Disable flow control and CR->NL conversion
 	
-	// Настраиваем минимальное количество символов и таймаут
-	raw.c_cc[VMIN] = 1;   // Читать хотя бы 1 символ
-	raw.c_cc[VTIME] = 0;  // Без таймаута
+	// Configure minimum number of characters and timeout
+	raw.c_cc[VMIN] = 1;   // Read at least 1 character
+	raw.c_cc[VTIME] = 0;  // No timeout
 	
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
 		perror("tcsetattr");
@@ -212,16 +212,16 @@ int terminal_read_char(terminal_state* state) {
 
 int get_char(terminal_state* state) {
 	enum parser_state {
-		STATE_NORMAL,      // Обычный ввод
-		STATE_ESC,         // Получен ESC
-		STATE_CSI,         // CSI последовательность ([)
-		STATE_OSC,         // OSC последовательность (])
-		STATE_SS3,         // SS3 последовательность (O)
-		STATE_IGNORE       // Игнорируем оставшуюся часть последовательности
+		STATE_NORMAL,      // Normal input
+		STATE_ESC,         // ESC received
+		STATE_CSI,         // CSI sequence ([)
+		STATE_OSC,         // OSC sequence (])
+		STATE_SS3,         // SS3 sequence (O)
+		STATE_IGNORE       // Ignore the rest of the sequence
 	} pst = STATE_NORMAL;
 	int osc_esc = 0;
 
-	// фильтруем esc-последовательности
+	// filter esc sequences
 	while(1) {
 		int ch = terminal_read_char(state);
 
@@ -247,16 +247,16 @@ int get_char(terminal_state* state) {
 			else if (ch == 'O')
 				pst = STATE_SS3;
 			else
-				return ch; // одиночный ESC или непонятно что
+				return ch; // single ESC or unknown
 			break;
 		case STATE_CSI:
-			// CSI последовательность: "ESC [ P...P I...I F"
-            // Завершается символом в диапазоне 0x40-0x7E
+            // CSI sequence: "ESC [ P...P I...I F"
+            // Ends with a character in the range 0x40-0x7E
             if (ch >= 0x40 && ch <= 0x7E)
                 pst = STATE_NORMAL;
 			break;
 		case  STATE_OSC:
-            // OSC последовательность: "ESC ] ... BEL или ESC ] ... ESC \"
+            // OSC sequence: "ESC ] ... BEL or ESC ] ... ESC \"
             if (osc_esc) {
                 if (ch == '\\')
                     pst = STATE_NORMAL;
@@ -268,12 +268,12 @@ int get_char(terminal_state* state) {
                 pst = STATE_NORMAL;
             break;
 		case STATE_SS3:
-            // SS3 последовательность: ESC O F
-            // Завершается одним символом
+            // SS3 sequence: ESC O F
+            // Ends with one character
             pst = STATE_NORMAL;
             break;
 		case STATE_IGNORE:
-            // Резервное состояние - просто ждём печатного символа
+            // Backup state - just wait for a printable character
             if (ch >= 32 && ch <= 126)
                 pst = STATE_NORMAL;
             break;            
