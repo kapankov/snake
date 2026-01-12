@@ -12,8 +12,9 @@
 	#include <sys/select.h> // select
 	#include <sys/time.h> // timeval
 #endif
-#include <stdio.h> //printf, perror
+#include <stdio.h>  //printf, perror
 #include <stdlib.h> // malloc, free
+#include <time.h>   // для time()
 
 const int game_pause = 100;
 const int game_frame_width = 40;
@@ -22,7 +23,9 @@ const int game_frame_height = 24;
 typedef struct terminal_state {
 #ifdef _WIN32
 	HANDLE input;
-	DWORD original_mode;
+	HANDLE output;
+	DWORD original_input_mode;
+	DWORD original_output_mode;
 #else
 	struct termios original_termios;
 #endif
@@ -35,7 +38,9 @@ void terminal_state_init(terminal_state* state) {
 	
 #ifdef _WIN32
 	state->input = INVALID_HANDLE_VALUE;
-	state->original_mode = 0;
+	state->output = INVALID_HANDLE_VALUE;
+	state->original_input_mode = 0;
+	state->original_output_mode = 0;
 #else
 	tcgetattr(STDIN_FILENO, &state->original_termios);
 #endif
@@ -49,17 +54,23 @@ void init_terminal(terminal_state* state) {
 #ifdef _WIN32
 	state->input = GetStdHandle(STD_INPUT_HANDLE);
 	if (state->input == INVALID_HANDLE_VALUE) {
-		fprintf(stderr, "Error: GetStdHandle failed\n");
+		fprintf(stderr, "Error: GetStdHandle(STD_INPUT_HANDLE) failed\n");
+		return;
+	}
+
+	state->output = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (state->output == INVALID_HANDLE_VALUE) {
+		fprintf(stderr, "Error: GetStdHandle(STD_OUTPUT_HANDLE) failed\n");
 		return;
 	}
 
 	// Сохраняем оригинальный режим
-	if (!GetConsoleMode(state->input, &state->original_mode)) {
-		fprintf(stderr, "Error: GetConsoleMode failed\n");
+	if (!GetConsoleMode(state->input, &state->original_input_mode)) {
+		fprintf(stderr, "Error: GetConsoleMode failed for stdin\n");
 		return;
 	}
 
-	DWORD mode = state->original_mode;
+	DWORD mode = state->original_input_mode;
 
 	// Ключевые настройки для VT-ввода:
 	mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;  // Включаем VT-последовательности
@@ -78,6 +89,16 @@ void init_terminal(terminal_state* state) {
 			return;
 		//}
 	}
+
+	if (!GetConsoleMode(state->output, &state->original_output_mode)) {
+		fprintf(stderr, "Error: GetConsoleMode failed for stdout\n");
+		return;
+	}
+
+	mode = state->original_output_mode;
+	mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+	if (!SetConsoleMode(state->output, mode))
+		return;
 #else
 	// Сохраняем текущие настройки
 	if (tcgetattr(STDIN_FILENO, &state->original_termios) == -1) {
@@ -112,7 +133,12 @@ void restore_terminal(terminal_state* state) {
 	if (state->input == INVALID_HANDLE_VALUE)
 		return;
 	
-	SetConsoleMode(state->input, state->original_mode);
+	SetConsoleMode(state->input, state->original_input_mode);
+
+	if (state->output == INVALID_HANDLE_VALUE)
+		return;
+
+	SetConsoleMode(state->output, state->original_output_mode);
 #else
    
 	tcsetattr(STDIN_FILENO, TCSAFLUSH, &state->original_termios);
@@ -498,6 +524,7 @@ int main(void)
 	terminal_state state;
 	terminal_state_init(&state);
 	init_terminal(&state);
+	srand((unsigned int)time(NULL));
 
 	game_state game = { 
 		Waiting, 

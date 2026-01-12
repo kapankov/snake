@@ -1,159 +1,178 @@
 Program Snake;
+
+{$mode objfpc} // Modern Object Pascal
+
 Uses
-	TIO,
+	tio,
 	SysUtils;
 
 Const
-	Pause = 100;
+	GamePause = 100;
 	GameFrameWidth = 40;
 	GameFrameHeight = 24;
 
 Type
-	GameAction = (Waiting, GameOver, MoveUp, MoveDown, MoveLeft, MoveRight);
+	PPoint = ^TPoint;
 	TPoint = Record
-		X: Integer;
-		Y: Integer
+		X, Y: Integer;
 	End;
-	
-	// Linked list fo snake body
+
 	PNode = ^TNode;
 	TNode = Record
 		Data: TPoint;
-		Next: PNode
+		Next: PNode;
 	End;
-	TLinkedList = Record
+
+	PTList = ^TList;
+	TList = Record
 		Head: PNode;
 	End;
-	// Game state
+
+	TGameAction = (
+		Waiting,
+		GameOver,
+		MoveUp,
+		MoveDown,
+		MoveLeft,
+		MoveRight
+	);
+
+	PGameState = ^TGameState;
 	TGameState = Record
-		Action: GameAction;
-		FrameWidth: Integer;
-		FrameHeight: Integer;
+		Action: TGameAction;
+		FrameWidth, FrameHeight: Integer;
 		Fruit: TPoint;
-		SnakeBody: TLinkedList;
-		Score: Integer
+		SnakeBody: TList;
+		Score: Integer;
 	End;
 
+// -------------------------
+// Linked List (Snake Body)
+// -------------------------
 
-// Function to compare two points
-Function PointEqual(const A, B: TPoint): Boolean;
-Begin
-	PointEqual := (A.X = B.X) And (A.Y = B.Y);
-End;
-
-// ######## forward list ########
-// insert at begin
-Procedure ListPush(Var List: TLinkedList; Point: TPoint);
+Procedure PushHead(List: PTList; Pt: TPoint);
 Var
 	NewNode: PNode;
 Begin
 	New(NewNode);
-	NewNode^.Data := Point;
-	NewNode^.Next := List.Head;
-	List.Head := NewNode
+	NewNode^.Data := Pt;
+	NewNode^.Next := List^.Head;
+	List^.Head := NewNode;
 End;
 
-// remove last element
-Procedure ListPop(Var List: TLinkedList);
+Procedure PopTail(List: PTList);
 Var
-	TailNode: PNode;
-	PrevNode: PNode;
+	Tail, Prev: PNode;
 Begin
-	If List.Head = nil Then
-		Exit;
-		
-	TailNode := List.Head;
-	PrevNode := nil;
-	
-	// Find the last node
-	While TailNode^.Next <> nil Do
+	Tail := List^.Head;
+	Prev := nil;
+
+	while (Tail <> nil) And (Tail^.Next <> nil) Do
 	Begin
-		PrevNode := TailNode;
-		TailNode := TailNode^.Next;
+		Prev := Tail;
+		Tail := Tail^.Next;
 	End;
-	
-	// If it's the only node in the list
-	If PrevNode = nil Then
-		List.Head := nil
+
+	If Prev <> nil Then
+		Prev^.Next := nil
 	Else
-		PrevNode^.Next := nil;
-		
-	// Dispose the last node
-	Dispose(TailNode);
+		List^.Head := nil;
+
+	Dispose(Tail);
 End;
 
-// ######## game ########
+// -------------------------
+// Game
+// -------------------------
 
-Procedure DrawFrame(Width: Integer; Height: Integer);
+Function PointEqual(Pt1, Pt2: PPoint): Boolean;
+Begin
+	Result := (Pt1^.X = Pt2^.X) And (Pt1^.Y = Pt2^.Y);
+End;
+
+Function GetRandomPoint: TPoint;
+Begin
+	Result.X := Random(GameFrameWidth - 6) + 3;
+	Result.Y := Random(GameFrameHeight - 6) + 3;
+End;
+
+Procedure DrawFrame(Width, Height: Integer);
 Var
-	Row, Column: Integer;
+	Column, Row: Integer;
 Begin
 	GotoXY(1, 1);
-	For Column := 1 To Width Do
-		write('#');
-	For Row := 2 To Height - 1 Do
+	For Column := 0 to Width - 1 Do
+		Write('#');
+
+	For Row := 2 to Height - 1 Do
 	Begin
 		GotoXY(1, Row);
-		write('#');
-		For Column := 1 To Width - 2 Do
-			write(' ');
-		write('#')
+		Write('#');
+		For Column := 1 to Width - 2 Do
+			Write(' ');
+		Write('#');
 	End;
+
 	GotoXY(1, Height);
-	For Column := 0 To Width - 1 Do
-		write('#')
+	For Column := 0 to Width - 1 Do
+		Write('#');
+	Flush(Output);
 End;
 
-Procedure Draw(State: TGameState);
+Procedure Draw(State: PGameState);
 Var
 	TailNode: PNode;
-	Point: TPoint;
+	Pt: TPoint;
 Begin
-	// Draw the snake
-	TailNode := State.SnakeBody.Head;
-	Point := TailNode^.Data;
-	GotoXY(Point.X, Point.Y);
-	Write('0');
+	TailNode := State^.SnakeBody.Head;
+	Pt := TailNode^.Data;
+	GotoXY(Pt.X, Pt.Y);
+	Write('O');
+	Flush(Output);
 
-	While TailNode^.Next<>nil Do
+	while TailNode^.Next <> nil Do
 		TailNode := TailNode^.Next;
-	
-	If TailNode <> State.SnakeBody.Head Then
+
+	If TailNode <> State^.SnakeBody.Head Then
 	Begin
-		Point := TailNode^.Data;
-		GotoXY(Point.X, Point.Y);
-		Write(' ');		
+		Pt := TailNode^.Data;
+		GotoXY(Pt.X, Pt.Y);
+		Write(' ');
 	End;
 
-	// Draw the fruit
-	GotoXY(State.Fruit.X, State.Fruit.Y);
+	GotoXY(State^.Fruit.X, State^.Fruit.Y);
 	Write('F');
-
+	Flush(Output);
 End;
 
-Function GetRandomPoint(): TPoint;
-Var
-	Point: TPoint;
+Procedure GetInput(Ch: Integer; State: PGameState);
 Begin
-	Point.X := Random(GameFrameWidth - 6) + 3;
-	Point.Y := Random(GameFrameHeight - 6) + 3;
-	GetRandomPoint := Point
+	If Ch = -1 Then
+		Exit;
+
+	case Chr(Ch) of
+		'w', 'W': If State^.Action <> MoveDown Then State^.Action := MoveUp;
+		's', 'S': If State^.Action <> MoveUp Then State^.Action := MoveDown;
+		'a', 'A': If State^.Action <> MoveRight Then State^.Action := MoveLeft;
+		'd', 'D': If State^.Action <> MoveLeft Then State^.Action := MoveRight;
+		'q', 'Q': State^.Action := GameOver;
+	End;
 End;
 
-Procedure UpdateFruit(Var State: TGameState);
+Procedure UpdateFruit(State: PGameState);
 Var
-	TailNode: PNode;
 	Found: Boolean;
+	TailNode: PNode;
 Begin
 	Found := False;
-	While Found = False Do
+	while Not Found Do
 	Begin
-		State.Fruit := GetRandomPoint();
+		State^.Fruit := GetRandomPoint;
 		Found := True;
-		TailNode := State.SnakeBody.Head;
-		While TailNode<>nil Do
+		TailNode := State^.SnakeBody.Head;
+		while TailNode <> nil Do
 		Begin
-			If PointEqual(State.Fruit, TailNode^.Data) Then
+			If PointEqual(@State^.Fruit, @TailNode^.Data) Then
 			Begin
 				Found := False;
 				Break;
@@ -163,98 +182,83 @@ Begin
 	End;
 End;
 
-Procedure DoLogic(Var State: TGameState);
+Procedure DoLogic(State: PGameState);
 Var
 	Head: TPoint;
 	Goal: Boolean;
 Begin
-	If State.Action = Waiting Then
+	If State^.Action = Waiting Then
 		Exit;
-	Head := State.SnakeBody.Head^.Data;
-	Case State.Action Of
-	MoveUp: Dec(Head.Y);
-	MoveDown: Inc(Head.Y);
-	MoveLeft: Dec(Head.X);
-	MoveRight: Inc(Head.X);
-	End;
-	// Check if head is out of bounds
-	If (Head.X < 2) Or (Head.X > State.FrameWidth - 1) Or (Head.Y < 2) Or (Head.Y > State.FrameHeight - 1) Then
-	Begin
-		State.Action := GameOver;
-		Exit;
-	End;
-	
-	// Check the fruit
-	Goal := PointEqual(State.Fruit, Head);
 
-	If (Not Goal) And (State.SnakeBody.Head^.Next <> nil) Then
-		ListPop(State.SnakeBody);
-	ListPush(State.SnakeBody, Head);
-	
+	Head := State^.SnakeBody.Head^.Data;
+
+	case State^.Action of
+		MoveUp: Dec(Head.Y);
+		MoveDown: Inc(Head.Y);
+		MoveLeft: Dec(Head.X);
+		MoveRight: Inc(Head.X);
+	End;
+
+	If (Head.X < 2) Or (Head.X > State^.FrameWidth - 1) Or
+		 (Head.Y < 2) Or (Head.Y > State^.FrameHeight - 1) Then
+	Begin
+		State^.Action := GameOver;
+		Exit;
+	End;
+
+	Goal := PointEqual(@State^.Fruit, @Head);
+
+	If Not Goal And (State^.SnakeBody.Head^.Next <> nil) Then
+		PopTail(@State^.SnakeBody);
+
+	PushHead(@State^.SnakeBody, Head);
+
 	If Goal Then
 	Begin
-		Inc(State.Score, 10);
-		UpdateFruit(State)
+		Inc(State^.Score, 10);
+		UpdateFruit(State);
 	End;
 End;
 
-Procedure GetInput(var Action: GameAction);
-Var
-	Key: Integer;
-Begin
-	Key := GetKey;
-	if Key = -1 Then
-		Exit;
-	Case Chr(Key) Of
-	'w', 'W': 
-		If Action <> MoveDown Then
-			Action := MoveUp;
-	's', 'S':
-		If Action <> MoveUp Then
-			Action := MoveDown;
-	'a', 'A':
-		If Action <> MoveRight Then
-			Action := MoveLeft;
-	'd', 'D':
-		If Action <> MoveLeft Then
-			Action := MoveRight;
-	'q', 'Q': Action := GameOver
-	End;
-End;
-
+// -------------------------
 // Main
+// -------------------------
+
 Var
-	State: TGameState = (
-		Action: Waiting;
-		FrameWidth: GameFrameWidth;
-		FrameHeight: GameFrameHeight;
-		Fruit: (
-			X: GameFrameWidth div 2;
-			Y: GameFrameHeight div 2
-			);
-		SnakeBody: (
-			Head: nil
-			);
-		Score: 0
-		);
+	TermState: TTerminalState;
+	GameState: TGameState;
+
 Begin
-	InitTerminal;
-	ClearScreen;
 	Randomize;
-	// Add snake head
-	ListPush(State.SnakeBody, GetRandomPoint());
-	DrawFrame(State.FrameWidth, State.FrameHeight);
+	TerminalStateInit(@TermState);
+	InitTerminal(@TermState);
+
+	GameState.Action := Waiting;
+	GameState.FrameWidth := GameFrameWidth;
+	GameState.FrameHeight := GameFrameHeight;
+	GameState.Fruit.X := GameFrameWidth Div 2;
+	GameState.Fruit.Y := GameFrameHeight Div 2;
+	GameState.SnakeBody.Head := nil;
+	GameState.Score := 0;
+
+	PushHead(@GameState.SnakeBody, GetRandomPoint);
+
+	CursorOff;
+	ClearScreen;
+	DrawFrame(GameState.FrameWidth, GameState.FrameHeight);
+
 	While True Do
 	Begin
-		Draw(State);
-		GetInput(State.Action);
-		If State.Action = GameOver Then
+		Draw(@GameState);
+		GetInput(GetChar(@TermState), @GameState);
+		DoLogic(@GameState);
+		If GameState.Action = GameOver Then
 			Break;
-		DoLogic(State);
-		Sleep(Pause)
+		Sleep(GamePause);
 	End;
 
 	ClearScreen;
-	WriteLn('Score: ', State.Score);
-	RestoreTerminal
+	CursorOn;
+	WriteLn('Score: ', GameState.Score);
+	RestoreTerminal(@TermState);
 End.

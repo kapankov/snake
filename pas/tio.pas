@@ -1,5 +1,7 @@
 Unit TIO;
 
+{$mode objfpc} // Modern Object Pascal
+
 Interface
 
 Uses
@@ -11,225 +13,297 @@ Uses
 {$ENDIF}
 	SysUtils;
 
-{$IFDEF LINUX}
-Var
-	OriginalTermios: TermIOS;
-{$ENDIF}
+Type
+	PTerminalState = ^TTerminalState;
+	TTerminalState = Record
+		{$IFDEF WIN32}
+		Input: THandle;
+		Output: THandle;
+		OriginalInputMode: DWORD;
+		OriginalOutputMode: DWORD;
+		{$ELSE}
+		OriginalTermios: termios;
+		{$ENDIF}
+		IsRaw: Boolean;
+	End;
 
-/// Clears the screen and moves cursor to top-left corner
-Procedure ClearScreen;
-/// Moves cursor to specified coordinates
-/// @param X horizontal position
-/// @param Y vertical position
+Procedure TerminalStateInit(State: PTerminalState);
+Procedure InitTerminal(State: PTerminalState);
+Procedure RestoreTerminal(State: PTerminalState);
 Procedure GotoXY(X, Y: Integer);
-/// Turns on cursor visibility
 Procedure CursorOn;
-/// Turns off cursor visibility
 Procedure CursorOff;
-/// Initializes terminal for non-canonical input mode
-Procedure InitTerminal;
-/// Restores original terminal settings
-Procedure RestoreTerminal;
-/// Non-blocking retrieval of the pressed key code
-Function GetKey: Integer;
+Procedure ClearScreen;
+Function TerminalReadChar(State: PTerminalState): Integer;
+Function GetChar(State: PTerminalState): Integer;
 
 Implementation
 
-Procedure ClearScreen;
+// -------------------------
+// Terminal State Management
+// -------------------------
+
+Procedure TerminalStateInit(State: PTerminalState);
 Begin
-	Write(#27'[2J');
-	Write(#27'[H');
+	{$IFDEF WIN32}
+	State^.Input := INVALID_HANDLE_VALUE;
+	State^.OriginalInputMode := 0;
+	State^.Output := INVALID_HANDLE_VALUE;
+	State^.OriginalOutputMode := 0;
+	{$ENDIF}
+	State^.IsRaw := False;
 End;
+
+Procedure InitTerminal(State: PTerminalState);
+Var
+{$IFDEF WIN32}
+	Mode: DWORD;
+{$ELSE}
+	Raw: termios;
+{$ENDIF}
+Begin
+	If (State = nil) Or State^.IsRaw Then
+		Exit;
+
+	{$IFDEF WIN32}
+	State^.Input := GetStdHandle(STD_INPUT_HANDLE);
+	If State^.Input = INVALID_HANDLE_VALUE Then
+	Begin
+		WriteLn(StdErr, 'Error: GetStdHandle(STD_INPUT_HANDLE) failed');
+		Exit;
+	End;
+
+	State^.Output := GetStdHandle(STD_OUTPUT_HANDLE);
+	If State^.Output = INVALID_HANDLE_VALUE Then
+	Begin
+		WriteLn(StdErr, 'Error: GetStdHandle(STD_OUTPUT_HANDLE) failed');
+		Exit;
+	End;
+
+	If Not GetConsoleMode(State^.Input, @State^.OriginalInputMode) Then
+	Begin
+		WriteLn(StdErr, 'Error: GetConsoleMode failed for stdin');
+		Exit;
+	End;
+
+	Mode := State^.OriginalInputMode;
+	Mode := Mode Or ENABLE_VIRTUAL_TERMINAL_INPUT;
+	Mode := Mode And Not ENABLE_PROCESSED_INPUT;
+	Mode := Mode And Not ENABLE_LINE_INPUT;
+	Mode := Mode And Not ENABLE_ECHO_INPUT;
+
+	If Not SetConsoleMode(State^.Input, Mode) Then
+		Exit;
+
+	If Not GetConsoleMode(State^.Output, @State^.OriginalOutputMode) Then
+	Begin
+		WriteLn(StdErr, 'Error: GetConsoleMode failed for stdout');
+		Exit;
+	End;
+
+	Mode := State^.OriginalOutputMode;
+	Mode := Mode Or ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+	If Not SetConsoleMode(State^.Output, Mode) Then
+		Exit;
+	{$ELSE}
+	If TCGetAttr(0, State^.OriginalTermios) < 0 Then
+	Begin
+		WriteLn(StdErr, 'Error: TCGetAttr failed');
+		Exit;
+	End;
+	Raw := State^.OriginalTermios;
+	Raw.c_lflag := Raw.c_lflag And Not (ICANON Or ECHO Or ISIG);
+	Raw.c_iflag := Raw.c_iflag And Not (IXON Or ICRNL);
+	Raw.c_cc[VMIN] := 1;
+	Raw.c_cc[VTIME] := 0;
+
+	If TCSetAttr(0, TCSANOW, raw) < 0 Then
+	Begin
+		WriteLn(StdErr, 'Error: TCSetAttr failed');
+		Exit;
+	End;
+	{$ENDIF}
+
+	State^.IsRaw := True;
+End;
+
+Procedure RestoreTerminal(State: PTerminalState);
+Begin
+	If (State = nil) Or Not State^.IsRaw Then
+		Exit;
+
+	{$IFDEF WIN32}
+	If State^.Input <> INVALID_HANDLE_VALUE Then
+		SetConsoleMode(State^.Input, State^.OriginalInputMode);
+	If State^.Output <> INVALID_HANDLE_VALUE Then
+		SetConsoleMode(State^.Output, State^.OriginalOutputMode);
+	{$ELSE}
+	TCSetAttr(0, TCSANOW, State^.OriginalTermios);
+	{$ENDIF}
+
+	State^.IsRaw := False;
+End;
+
+// -------------------------
+// Terminal Control Functions
+// -------------------------
 
 Procedure GotoXY(X, Y: Integer);
 Begin
-	Write(#27'[', Y, ';', X, 'H');
+	Write(Format(#27'[%d;%dH', [Y, X]));
 	Flush(Output);
 End;
 
 Procedure CursorOn;
 Begin
 	Write(#27'[?25h');
-	Flush(Output)
+	Flush(Output);
 End;
 
 Procedure CursorOff;
 Begin
 	Write(#27'[?25l');
-	Flush(Output)
+	Flush(Output);
 End;
 
-Procedure InitTerminal;
-{$IFDEF LINUX}
-Var
-	NewTerm: TermIOS;
+Procedure ClearScreen;
 Begin
-	// Save the original settings
-	TCGetAttr(0, OriginalTermios);
-
-	// Set non-canonical mode
-	NewTerm := OriginalTermios;
-	NewTerm.c_lflag := NewTerm.c_lflag and (not (ICANON or ECHO));
-	NewTerm.c_cc[VMIN] := 0;   // Non-blocking input
-	NewTerm.c_cc[VTIME] := 0;  // No timeout
-	TCSetAttr(0, TCSANOW, NewTerm);
-{$ENDIF}
-{$IFDEF WINDOWS}
-Var
-	ConsoleHandle: THandle;
-	ConsoleMode: DWORD;
-Begin
-	// For Windows enable ANSI escape code support
-	// Get console handle
-	ConsoleHandle := GetStdHandle(STD_OUTPUT_HANDLE);
-	If GetConsoleMode(ConsoleHandle, @ConsoleMode) Then
-	Begin
-		// Enable ENABLE_VIRTUAL_TERMINAL_PROCESSING flag
-		SetConsoleMode(ConsoleHandle, ConsoleMode OR ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-	End;
-{$ENDIF}
-	CursorOff
+	Write(#27'[2J'#27'[H');
+	Flush(Output);
 End;
 
-Procedure RestoreTerminal;
-Begin
-	{$IFDEF LINUX}
-	// Restore the original settings
-	TCSetAttr(0, TCSANOW, OriginalTermios);
+// -------------------------
+// Input Handling
+// -------------------------
+
+Function TerminalReadChar(State: PTerminalState): Integer;
+Var
+		Ch: Char;
+	{$IFDEF WIN32}
+		InputRecord: TInputRecord;
+		EventsRead: DWORD;
+		CharsRead: DWORD;
+	{$ELSE}
+		ReadFds: TFDSet;
+		TimeOut: TTimeVal;
 	{$ENDIF}
-
-	CursorOn
-End;
-
-Function GetKey: Integer;
-{$IFDEF WINDOWS}
-Var
-	ConsoleHandle: THandle;
-	NumPending: DWord;
-	InputRecord: TInputRecord;
-	NumRead: DWord;
-	KeyDown: Boolean;
 Begin
-	ConsoleHandle := GetStdHandle(STD_INPUT_HANDLE);
-
-	If not GetNumberOfConsoleInputEvents(ConsoleHandle, NumPending) Then
-	Begin
-		GetKey := -1;
+	Result := -1;
+	If (State = nil) Or Not State^.IsRaw Then
 		Exit;
+
+	{$IFDEF WIN32}
+	While True Do
+	Begin
+		If Not PeekConsoleInput(State^.Input, InputRecord, 1, EventsRead) Then
+			Exit;
+
+		If EventsRead = 0 Then
+			Exit;
+
+		If (InputRecord.EventType = KEY_EVENT) And 
+			(InputRecord.Event.KeyEvent.bKeyDown) Then
+			Break;
+
+		ReadConsoleInput(State^.Input, InputRecord, 1, EventsRead);
 	End;
 
-	If NumPending = 0 Then
-	Begin
-		GetKey := -1;
+	If Not ReadConsoleA(State^.Input, @Ch, 1, CharsRead, nil) Then
 		Exit;
-	End;
+	Result := Ord(Ch);
+	{$ELSE}
+	TimeOut.tv_sec := 0;
+	TimeOut.tv_usec := 0;
 
-	While NumPending > 0 Do
-	Begin
-		If ReadConsoleInput(ConsoleHandle, InputRecord, 1, NumRead) Then
-		Begin
-			If InputRecord.EventType = KEY_EVENT Then
-			Begin
-				KeyDown := InputRecord.Event.KeyEvent.bKeyDown;
-				If KeyDown Then
-				Begin
-					If InputRecord.Event.KeyEvent.AsciiChar <> #0 Then
-					Begin
-						GetKey := Integer(InputRecord.Event.KeyEvent.AsciiChar);
-						Exit;
-					End
-					Else
-					Begin
-						GetKey := InputRecord.Event.KeyEvent.wVirtualKeyCode;
-						Exit;
-					End;
-				End;
-			End;
-		End;
-		Dec(NumPending);
-	End;
-	GetKey := -1;
-End;
-{$ENDIF}
-{$IFDEF LINUX}
-Var
-	BytesAvailable: Integer;
-	Ch: Char;
-	NextCh: Char;
-	ThirdCh: Char;
-Begin
-	// Check if there are data available to read
-	FpIOCtl(0, FIONREAD, @BytesAvailable);
+	fpFD_ZERO(ReadFds);
+	fpFD_SET(StdInputHandle, ReadFds);
 	
-	// If no bytes available, return -1
-	If BytesAvailable = 0 Then
+	If (fpSelect(StdInputHandle + 1, @ReadFds, nil, nil, @TimeOut) > 0) And 
+		(fpFD_ISSET(StdInputHandle, ReadFds) > 0) Then
 	Begin
-		GetKey := -1;
-		Exit;
-	End;
-	
-	// Read the first byte
-	Read(Ch);
-	
-	// If this is ESC (0x1B), it's the beginning of an escape sequence
-	If Ord(Ch) = 27 Then
-	Begin
-		// Check if there are more bytes to read
-		If BytesAvailable > 0 Then
-		Begin
-			// Read the next byte
-			Read(NextCh);
-			// If this is '[' - it's the beginning of arrow keys escape sequence
-			If NextCh = '[' Then
-			Begin
-				// Skip the remaining bytes of the arrow keys sequence
-				// Read and check the type of sequence
-				// Just skip all characters until the end of sequence (until we meet a letter)
-				While BytesAvailable > 0 Do
-				Begin
-					Read(Ch);
-					// If the character is a letter (ASCII 65-90 or 97-122), then this is the end of sequence
-					If (Ch >= 'A') And (Ch <= 'Z') Or (Ch >= 'a') And (Ch <= 'z') Then
-						Break;
-					Dec(BytesAvailable);
-				End;
-				// Return -1 to ignore the whole escape sequence
-				GetKey := -1;
-			End
-			Else If Ord(NextCh) = 79 Then // 79 = 'O' - for function keys F1-F12
-			Begin
-				// Read the third byte
-				If BytesAvailable > 0 Then
-				Begin
-					Read(ThirdCh);
-					// Skip the function key (F1-F12)
-					// Return -1 to ignore the whole escape sequence
-					GetKey := -1;
-				End
-				Else
-				Begin
-					// If there is no third byte, return the 'O' character
-					GetKey := Ord(NextCh);
-				End;
-			End
-			Else
-			Begin
-				// This is not an arrow keys or function keys escape sequence, return the character
-				GetKey := Ord(Ch); // Return the first character
-			End;
-		End
-		Else
-		Begin
-			// No additional bytes, return ESC
-			GetKey := Ord(Ch);
-		End;
+		If fpRead(StdInputHandle, @Ch, 1) <> 1 Then
+			Exit;
 	End
 	Else
-	Begin
-		// Return the regular character
-		GetKey := Ord(Ch);
-	End;
+		Exit;
+	{$ENDIF}
 End;
-{$ENDIF}
+
+Function GetChar(State: PTerminalState): Integer;
+type
+	TParserState = (
+		STATE_NORMAL,
+		STATE_ESC,
+		STATE_CSI,
+		STATE_OSC,
+		STATE_SS3,
+		STATE_IGNORE
+	);
+Var
+	ParserState: TParserState;
+	OscEsc: Boolean;
+	Ch: Integer;
+Begin
+	ParserState := STATE_NORMAL;
+	OscEsc := False;
+
+	while True Do
+	Begin
+		Ch := TerminalReadChar(State);
+		If Ch = -1 Then
+		Begin
+			Result := -1;
+			Exit;
+		End;
+
+		Case ParserState Of
+			STATE_NORMAL:
+				If Ch = 27 Then
+					ParserState := STATE_ESC
+				Else
+					Break;
+
+			STATE_ESC:
+				If Ch = Ord('[') Then
+					ParserState := STATE_CSI
+				Else If Ch = Ord(']') Then
+				Begin
+					ParserState := STATE_OSC;
+					OscEsc := False;
+				end
+				Else If Ch = Ord('O') Then
+					ParserState := STATE_SS3
+				Else
+					Break;
+
+			STATE_CSI:
+				If (Ch >= $40) And (Ch <= $7E) Then
+					ParserState := STATE_NORMAL;
+
+			STATE_OSC:
+				Begin
+					If OscEsc Then
+					Begin
+						If Ch = Ord('\') Then
+							ParserState := STATE_NORMAL;
+						OscEsc := False;
+					end
+					Else If Ch = 27 Then
+						OscEsc := True
+					Else If Ch = Ord(#7) Then // BEL
+						ParserState := STATE_NORMAL;
+				End;
+
+			STATE_SS3:
+				ParserState := STATE_NORMAL;
+
+			STATE_IGNORE:
+				If (Ch >= 32) And (Ch <= 126) Then
+					ParserState := STATE_NORMAL;
+		End;
+	End;
+
+	Result := Ch;
+End;
 
 End.
