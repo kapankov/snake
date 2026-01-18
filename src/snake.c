@@ -4,213 +4,20 @@
  * @author Konstantin A. Pankov(explorus@mail.ru)
  * @license Licensed under the MIT License, Version 2.0 (see LICENSE.txt).
  */
-#ifdef _WIN32
-	#include <windows.h>
-#else
-	#include <termios.h>
-	#include <unistd.h> // STDIN_FILENO
-	#include <sys/select.h> // select
-	#include <sys/time.h> // timeval
+#ifndef _WIN32
+	#include <unistd.h> // usleep
 #endif
+
 #include <stdio.h>  //printf, perror
 #include <stdlib.h> // malloc, free
 #include <time.h>   // для time()
+#include "tio.h"
 
 const int game_pause = 100;
 const int game_frame_width = 40;
 const int game_frame_height = 24;
 
-typedef struct terminal_state {
-#ifdef _WIN32
-	HANDLE input;
-	HANDLE output;
-	DWORD original_input_mode;
-	DWORD original_output_mode;
-#else
-	struct termios original_termios;
-#endif
-	int is_raw;
-} terminal_state;
-
-void terminal_state_init(terminal_state* state) {
-	if (state == NULL)
-		return;
-	
-#ifdef _WIN32
-	state->input = INVALID_HANDLE_VALUE;
-	state->output = INVALID_HANDLE_VALUE;
-	state->original_input_mode = 0;
-	state->original_output_mode = 0;
-#else
-	tcgetattr(STDIN_FILENO, &state->original_termios);
-#endif
-	state->is_raw = 0;
-}
-
-void init_terminal(terminal_state* state) {
-	if (state == NULL || state->is_raw)
-		return;
-	
-#ifdef _WIN32
-	state->input = GetStdHandle(STD_INPUT_HANDLE);
-	if (state->input == INVALID_HANDLE_VALUE) {
-		fprintf(stderr, "Error: GetStdHandle(STD_INPUT_HANDLE) failed\n");
-		return;
-	}
-
-	state->output = GetStdHandle(STD_OUTPUT_HANDLE);
-	if (state->output == INVALID_HANDLE_VALUE) {
-		fprintf(stderr, "Error: GetStdHandle(STD_OUTPUT_HANDLE) failed\n");
-		return;
-	}
-
-	// Save the original mode
-	if (!GetConsoleMode(state->input, &state->original_input_mode)) {
-		fprintf(stderr, "Error: GetConsoleMode failed for stdin\n");
-		return;
-	}
-
-	DWORD mode = state->original_input_mode;
-
-	// Key settings for VT input:
-	mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;  // Enable VT sequences
-	mode &= ~ENABLE_PROCESSED_INPUT;        // Get "raw" escape codes
-	mode &= ~ENABLE_LINE_INPUT;             // Non-canonical mode
-	mode &= ~ENABLE_ECHO_INPUT;             // No echo
-
-	// Optional for mouse
-	// mode |= ENABLE_MOUSE_INPUT;
-
-	if (!SetConsoleMode(state->input, mode)) {
-		// Try without ENABLE_VIRTUAL_TERMINAL_INPUT (for older Windows)
-		//mode &= ~ENABLE_VIRTUAL_TERMINAL_INPUT;
-		//if (!SetConsoleMode(state->input, mode)) {
-		//	fprintf(stderr, "Error: SetConsoleMode failed\n");
-			return;
-		//}
-	}
-
-	if (!GetConsoleMode(state->output, &state->original_output_mode)) {
-		fprintf(stderr, "Error: GetConsoleMode failed for stdout\n");
-		return;
-	}
-
-	mode = state->original_output_mode;
-	mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-	if (!SetConsoleMode(state->output, mode))
-		return;
-#else
-	// Save current settings
-	if (tcgetattr(STDIN_FILENO, &state->original_termios) == -1) {
-		perror("tcgetattr");
-		return;
-	}
-	
-	// Set non-canonical mode
-	struct termios raw = state->original_termios;
-	raw.c_lflag &= ~(ICANON | ECHO);
-	// Additional settings for more "raw" mode:
-	raw.c_lflag &= ~ISIG;  // Disable signal handling (Ctrl+C, Ctrl+Z)
-	raw.c_iflag &= ~(IXON | ICRNL); // Disable flow control and CR->NL conversion
-	
-	// Configure minimum number of characters and timeout
-	raw.c_cc[VMIN] = 1;   // Read at least 1 character
-	raw.c_cc[VTIME] = 0;  // No timeout
-	
-	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
-		perror("tcsetattr");
-		return;
-	}
-#endif
-	state->is_raw = 1;
-}
-
-void restore_terminal(terminal_state* state) {
-	if (state == NULL || !state->is_raw)
-		return;
-
-#ifdef _WIN32
-	if (state->input == INVALID_HANDLE_VALUE)
-		return;
-	
-	SetConsoleMode(state->input, state->original_input_mode);
-
-	if (state->output == INVALID_HANDLE_VALUE)
-		return;
-
-	SetConsoleMode(state->output, state->original_output_mode);
-#else
-   
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &state->original_termios);
-#endif
-	state->is_raw = 0;
-}
-
-void goto_xy(int x, int y) {
-    printf("\033[%d;%dH", y, x);
-    fflush(stdout);
-}
-
-void cursor_on(void) {
-	const char esc_seq[] = "\033[?25h";
-	fwrite(esc_seq, 1, sizeof(esc_seq) - 1, stdout);
-	fflush(stdout);
-}
-
-void cursor_off(void) {
-	const char esc_seq[] = "\033[?25l";
-	fwrite(esc_seq, 1, sizeof(esc_seq) - 1, stdout);
-	fflush(stdout);
-}
-
-void clear_screen(void) {
-	const char esc_seq[] = "\033[2J\033[H";
-	fwrite(esc_seq, 1, sizeof(esc_seq) - 1, stdout);
-	fflush(stdout);
-}
-
-int terminal_read_char(terminal_state* state) {
-	if (state == NULL || !state->is_raw)
-		return EOF;
-
-	char ch;
-#ifdef _WIN32
-	while (1) {
-		INPUT_RECORD input_record;
-		DWORD events_read = 0;
-
-		if (!PeekConsoleInput(state->input, &input_record, 1, &events_read))
-			return EOF;
-
-		if (events_read == 0)
-			return EOF;
-
-		if (input_record.EventType == KEY_EVENT &&
-			input_record.Event.KeyEvent.bKeyDown)
-			break;
-
-		ReadConsoleInput(state->input, &input_record, 1, &events_read);
-	}
-
-	DWORD charsRead = 0;
-	if (!ReadConsoleA(state->input, &ch, 1, &charsRead, NULL))
-		return EOF;
-#else
-	fd_set readfds;
-    struct timeval timeout = {0, 0};
-    
-    FD_ZERO(&readfds);
-    FD_SET(STDIN_FILENO, &readfds);
-    
-    int result = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &timeout);
-    
-    if (result > 0 && FD_ISSET(STDIN_FILENO, &readfds) && read(STDIN_FILENO, &ch, 1) != 1)
-		return EOF;
-#endif
-	return (unsigned char)ch;
-}
-
-int get_char(terminal_state* state) {
+int get_char(TERM* term) {
 	enum parser_state {
 		STATE_NORMAL,      // Normal input
 		STATE_ESC,         // ESC received
@@ -223,7 +30,7 @@ int get_char(terminal_state* state) {
 
 	// filter esc sequences
 	while(1) {
-		int ch = terminal_read_char(state);
+		int ch = terminal_read_char(term);
 
 		if (ch == EOF)
 			return ch;
@@ -521,9 +328,10 @@ void do_logic(game_state* state) {
 
 int main(void)
 {
-	terminal_state state;
-	terminal_state_init(&state);
-	init_terminal(&state);
+	TERM* term = init_terminal();
+	if (term == NULL)
+		return 1;
+
 	srand((unsigned int)time(NULL));
 
 	game_state game = { 
@@ -541,7 +349,7 @@ int main(void)
 
 	while(1) {
 		draw(&game);
-		get_input(get_char(&state), &game);
+		get_input(get_char(term), &game);
 		do_logic(&game);
 		if (game.action == GameOver)
 			break;
@@ -551,6 +359,6 @@ int main(void)
 	clear_screen();
 	cursor_on();
 	printf("Score: %d\n", game.score);
-	restore_terminal(&state);
+	restore_terminal(term);
 	return 0;
 }
